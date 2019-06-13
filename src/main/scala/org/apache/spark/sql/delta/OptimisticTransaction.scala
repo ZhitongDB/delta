@@ -151,6 +151,11 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
   protected var commitInfo: CommitInfo = _
   protected var dependsOnFiles: Boolean = false
 
+  /** Tracks the data that could have been seen by this transaction. */
+  protected val readPredicates = new ArrayBuffer[Expression]
+  /** Tracks specific files that have been seen by this transaction. */
+  protected val readFiles = new mutable.HashSet[AddFile]
+
   /** The version that this transaction is reading from. */
   def readVersion: Long = snapshot.version
 
@@ -201,21 +206,10 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
 
   /** Returns files matching the given predicates. */
   def filterFiles(filters: Seq[Expression]): Seq[AddFile] = {
-//    implicit val enc = SingleAction.addFileEncoder
-//
-//    dependsOnFiles = true
-//
-//    DeltaLog.filterFileList(
-//      metadata.partitionColumns,
-//      snapshot.allFiles.toDF(),
-//      filters).as[AddFile].collect()
     filesForScan(projection = Nil, filters).files
   }
-  /** Tracks the data that could have been seen by this transaction. */
-  protected val readPredicates = new ArrayBuffer[Expression]
-  /** Tracks specific files that have been seen by this transaction. */
-  protected val readFiles = new mutable.HashSet[AddFile]
 
+  /** Returns a[[DeltaScan]] based on the given filters and projections. */
   def filesForScan(
     projection: Seq[Attribute],
     filters: Seq[Expression],
