@@ -20,11 +20,11 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.delta.files.{TahoeBatchFileIndex, TahoeFileIndex}
 import org.apache.spark.sql.execution.command.RunnableCommand
-import org.apache.spark.sql.catalyst.expressions.{Expression, InputFileName}
+import org.apache.spark.sql.catalyst.expressions.{EqualNullSafe, Expression, InputFileName, Literal, Not}
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaTableUtils, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.Action
 import org.apache.spark.sql._
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.sql.types.BooleanType
 
 
 /**
@@ -41,7 +41,7 @@ case class DeleteCommand(
   tahoeFileIndex: TahoeFileIndex,
   target: LogicalPlan,
   condition: Option[Expression])
-  extends RunnableCommand with DeltaEdgeCommand {
+  extends RunnableCommand with DeltaCommand {
 
   override def innerChildren: Seq[QueryPlan[_]] = Seq(target)
 
@@ -135,7 +135,7 @@ case class DeleteCommand(
             val newTarget = DeltaTableUtils.replaceFileIndex(target, baseRelation.location)
 
             val targetDF = Dataset.ofRows(sparkSession, newTarget)
-            val filterCond = notOrIsNull(sparkSession, cond, target, txn.deltaLog, "delete")
+            val filterCond = Not(EqualNullSafe(cond, Literal(true, BooleanType)))
             val updatedDF = targetDF.filter(new Column(filterCond))
 
             val rewrittenFiles = withStatusCode(
@@ -192,13 +192,4 @@ case class DeleteCommand(
 
 object DeleteCommand {
   val FILE_NAME_COLUMN = "_input_file_name_"
-}
-
-object Dataset {
-  def ofRows(sparkSession: SparkSession, logicalPlan: LogicalPlan): DataFrame = {
-    val qe = sparkSession.sessionState.executePlan(logicalPlan)
-    qe.assertAnalyzed()
-    val encoder: Encoder[Row] = RowEncoder(qe.analyzed.schema)
-    new Dataset(sparkSession, logicalPlan, encoder)
-  }
 }
