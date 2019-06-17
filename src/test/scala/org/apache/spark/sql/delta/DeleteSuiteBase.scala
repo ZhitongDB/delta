@@ -18,12 +18,12 @@ package org.apache.spark.sql.delta
 
 import java.io.File
 
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import io.delta.DeltaTable
 import org.apache.hadoop.fs.Path
 import org.scalatest.BeforeAndAfterEach
 
 import org.apache.spark.sql.{AnalysisException, DataFrame, QueryTest, Row}
-import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.util.Utils
 
@@ -38,8 +38,6 @@ class DeleteSuiteBase extends QueryTest
   var deltaLog: DeltaLog = _
 
   private def tempPath = tempDir.getCanonicalPath
-
-  private def getDeltaFileStmt(path: String) = s"SELECT key, value FROM delta.`$path`"
 
   private def readDeltaTable(path: String): DataFrame = {
     spark.read.format("delta").load(path)
@@ -67,7 +65,6 @@ class DeleteSuiteBase extends QueryTest
     }
     if (where != null) {
       deltaTable.delete(where)
-//      deltaTable.toDF.show()
     } else {
       deltaTable.delete()
     }
@@ -82,9 +79,9 @@ class DeleteSuiteBase extends QueryTest
   }
 
   private def checkDelete(
-    condition: Option[String],
-    expectedResults: Seq[Row],
-    tableName: Option[String] = None): Unit = {
+      condition: Option[String],
+      expectedResults: Seq[Row],
+      tableName: Option[String] = None): Unit = {
     spark.read.format("delta").load(tempPath).createOrReplaceTempView("deltaTable")
     executeDelete(target = "deltaTable", where = condition.orNull)
     checkAnswer(readDeltaTable(tempPath), expectedResults)
@@ -102,19 +99,22 @@ class DeleteSuiteBase extends QueryTest
   Seq(true, false).foreach { isPartitioned =>
     test(s"basic case - delete from a Delta table - Partition=$isPartitioned") {
       withTable("delta_table") {
-
         val partitions = if (isPartitioned) "key" :: Nil else Nil
         val input = Seq((2, 2), (1, 4), (1, 1), (0, 3)).toDF("key", "value")
         append(input, partitions)
 
         checkDelete(Some("value = 4 and key = 3"),
-          Row(2, 2) :: Row(1, 4) :: Row(1, 1) :: Row(0, 3) :: Nil)
+          Row(2, 2) :: Row(1, 4) :: Row(1, 1) :: Row(0, 3) :: Nil,
+          Some("delta_table"))
         checkDelete(Some("value = 4 and key = 1"),
-          Row(2, 2) :: Row(1, 1) :: Row(0, 3) :: Nil)
+          Row(2, 2) :: Row(1, 1) :: Row(0, 3) :: Nil,
+          Some("delta_table"))
         checkDelete(Some("value = 2 or key = 1"),
-          Row(0, 3) :: Nil)
+          Row(0, 3) :: Nil,
+          Some("delta_table"))
         checkDelete(Some("key = 0 or value = 99"),
-          Nil)
+          Nil,
+          Some("delta_table"))
       }
     }
   }
@@ -203,7 +203,6 @@ class DeleteSuiteBase extends QueryTest
   test("Negative case - non-deterministic condition") {
     append(Seq((2, 2), (1, 4), (1, 1), (0, 3)).toDF("key", "value"))
     val e = intercept[AnalysisException] {
-//      executeDelete(target = s"delta.`$tempPath`", where = "rand() > 0.5")
       spark.read.format("delta").load(tempPath).createOrReplaceTempView("deltaTable")
       executeDelete(target = "deltaTable", where = "rand() > 0.5")
     }.getMessage
@@ -258,16 +257,6 @@ class DeleteSuiteBase extends QueryTest
 //    assert(e.contains("Expect a full scan of Delta sources, but found the partial scan"))
 //  }
 
-//  test("explain") {
-//    append(Seq((2, 2)).toDF("key", "value"))
-//    val df = sql(s"EXPLAIN DELETE FROM delta.`$tempPath` WHERE key = 2")
-//    val outputs = df.collect().map(_.mkString).mkString
-//    assert(outputs.contains("Delta"))
-//    assert(!outputs.contains("index") && !outputs.contains("ActionLog"))
-//    // no change should be made by explain
-//    checkAnswer(sql(getDeltaFileStmt(tempPath)), Row(2, 2))
-//  }
-
 //  test("delete cached table") {
 //    withTable("deltaTable") {
 //      Seq((2, 2), (1, 4)).toDF("key", "value").write.format("delta").saveAsTable("deltaTable")
@@ -320,7 +309,7 @@ class DeleteSuiteBase extends QueryTest
 //      )
 //    }
 //  }
-//
+
 //  test("SC-13255: Allow non-unique filenames") {
 //    withTempDir { tempDir =>
 //      val dir = new File(tempDir, "foo %+bar").getCanonicalFile

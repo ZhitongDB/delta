@@ -16,16 +16,16 @@
 
 package org.apache.spark.sql.delta.commands
 
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.catalyst.plans.QueryPlan
-import org.apache.spark.sql.delta.files.{TahoeBatchFileIndex, TahoeFileIndex}
-import org.apache.spark.sql.execution.command.RunnableCommand
-import org.apache.spark.sql.catalyst.expressions.{EqualNullSafe, Expression, InputFileName, Literal, Not}
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaTableUtils, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.Action
-import org.apache.spark.sql._
-import org.apache.spark.sql.types.BooleanType
+import org.apache.spark.sql.delta.files.{TahoeBatchFileIndex, TahoeFileIndex}
 
+import org.apache.spark.sql.{Column, Dataset, Row, SparkSession}
+import org.apache.spark.sql.catalyst.expressions.{EqualNullSafe, Expression, InputFileName, Literal, Not}
+import org.apache.spark.sql.catalyst.plans.QueryPlan
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.types.BooleanType
 
 /**
  * Performs a Delete based on the search condition
@@ -38,15 +38,14 @@ import org.apache.spark.sql.types.BooleanType
  *      the affected files that are identified in step 1.
  */
 case class DeleteCommand(
-  tahoeFileIndex: TahoeFileIndex,
-  target: LogicalPlan,
-  condition: Option[Expression])
-  extends RunnableCommand with DeltaCommand {
+    tahoeFileIndex: TahoeFileIndex,
+    target: LogicalPlan,
+    condition: Option[Expression])
+    extends RunnableCommand with DeltaCommand {
 
   override def innerChildren: Seq[QueryPlan[_]] = Seq(target)
 
   // At this point we should have already passed the ACL checks, so it is safe to whitelist.
-  //  CheckPermissions.trusted
   final override def run(sparkSession: SparkSession): Seq[Row] = {
     recordDeltaOperation(tahoeFileIndex.deltaLog, "delta.dml.delete") {
       val deltaLog = tahoeFileIndex.deltaLog
@@ -63,7 +62,7 @@ case class DeleteCommand(
   }
 
   private def performDelete(
-    sparkSession: SparkSession, deltaLog: DeltaLog, txn: OptimisticTransaction) = {
+      sparkSession: SparkSession, deltaLog: DeltaLog, txn: OptimisticTransaction) = {
     import sparkSession.implicits._
 
     var numTouchedFiles: Long = 0
@@ -88,6 +87,7 @@ case class DeleteCommand(
         val (metadataPredicates, otherPredicates) =
           DeltaTableUtils.splitMetadataAndDataPredicates(
             cond, txn.metadata.partitionColumns, sparkSession)
+
         if (otherPredicates.isEmpty) {
           // Case 2: The condition can be evaluated using metadata only.
           //         Delete a set of files without the need of scanning any data files.
@@ -182,14 +182,15 @@ case class DeleteCommand(
    * @note All the time units are milliseconds.
    */
   case class DeleteMetric(
-    condition: String,
-    numFilesTotal: Long,
-    numTouchedFiles: Long,
-    numRewrittenFiles: Long,
-    scanTimeMs: Long,
-    rewriteTimeMs: Long)
+      condition: String,
+      numFilesTotal: Long,
+      numTouchedFiles: Long,
+      numRewrittenFiles: Long,
+      scanTimeMs: Long,
+      rewriteTimeMs: Long)
 }
 
 object DeleteCommand {
   val FILE_NAME_COLUMN = "_input_file_name_"
 }
+

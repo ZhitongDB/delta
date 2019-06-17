@@ -16,17 +16,18 @@
 
 package io.delta.execution
 
+import org.apache.spark.sql.delta.{DeltaErrors, DeltaFullTable}
+import org.apache.spark.sql.delta.commands.DeleteCommand
 import io.delta.DeltaTable
 
-import org.apache.spark.sql._
+import org.apache.spark.sql.{functions, Column, Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.delta._
-import org.apache.spark.sql.delta.commands.DeleteCommand
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.internal.SQLConf
+
 
 trait DeltaTableOperations { self: DeltaTable =>
 
@@ -36,7 +37,7 @@ trait DeltaTableOperations { self: DeltaTable =>
 
   def delete(condition: Column): Unit = {
     val sparkSession = SparkSession.getActiveSession.getOrElse(self.toDF.sparkSession)
-    val delete: LogicalPlan = Delete(self.toDF.queryExecution.analyzed, Some(condition.expr))
+    val delete: LogicalPlan = DeleteOp(self.toDF.queryExecution.analyzed, Some(condition.expr))
     val analyzer = sparkSession.sessionState.analyzer
     val resolvedDelete = analyzer.executeAndCheck(delete)
 
@@ -49,7 +50,7 @@ trait DeltaTableOperations { self: DeltaTable =>
 
   def delete(): Unit = {
     val sparkSession = SparkSession.getActiveSession.getOrElse(self.toDF.sparkSession)
-    val delete: LogicalPlan = Delete(self.toDF.queryExecution.analyzed, None)
+    val delete: LogicalPlan = DeleteOp(self.toDF.queryExecution.analyzed, None)
     val analyzer = sparkSession.sessionState.analyzer
     val resolvedDelete = analyzer.executeAndCheck(delete)
     val deleteCommand =
@@ -66,7 +67,7 @@ trait DeltaTableOperations { self: DeltaTable =>
  * @param child the logical plan representing target table
  * @param condition: Only rows that match the condition will be deleted.
  */
-case class Delete(
+case class DeleteOp(
   child: LogicalPlan,
   condition: Option[Expression])
   extends UnaryNode {
@@ -74,19 +75,20 @@ case class Delete(
 }
 
 /**
- * Preprocess the [[Delete]] plan
+ * Preprocess the [[DeleteOp]] plan
  */
 case class PreprocessTableDelete(conf: SQLConf) extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
-      val d = plan.asInstanceOf[Delete]
-      val index = EliminateSubqueryAliases(d.child) match {
-        case DeltaFullTable(tahoeFileIndex) =>
-          tahoeFileIndex
-        case o =>
-          throw DeltaErrors.notADeltaSourceException("DELETE", Some(o))
-      }
-      DeleteCommand(index, d.child, d.condition)
+    val delete = plan.asInstanceOf[DeleteOp]
+    val index = EliminateSubqueryAliases(delete.child) match {
+      case DeltaFullTable(tahoeFileIndex) =>
+        tahoeFileIndex
+      case o =>
+        throw DeltaErrors.notADeltaSourceException("DELETE", Some(o))
+    }
+
+    DeleteCommand(index, delete.child, delete.condition)
   }
 }
 

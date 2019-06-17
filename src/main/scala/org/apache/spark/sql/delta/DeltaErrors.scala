@@ -92,6 +92,7 @@ object DeltaErrors
       " currently not supported during inserts")
   }
 
+
   def operationNotSupportedException(
       operation: String, tableIdentifier: TableIdentifier): Throwable = {
     new AnalysisException(
@@ -602,6 +603,15 @@ abstract class DeltaConcurrentModificationException(message: String)
    */
   def conflictType: String = this.getClass.getSimpleName.stripSuffix("Exception")
 }
+
+/**
+ * Thrown when a concurrent transaction has written data after the current transaction read the
+ * table.
+ */
+class ConcurrentWriteException(
+    conflictingCommit: Option[CommitInfo]) extends DeltaConcurrentModificationException(
+  s"A concurrent transaction has written new data since the current transaction " +
+    s"read the table. Please try the operation again.", conflictingCommit)
 
 /**
  * Thrown when the metadata of the Delta table has changed between the time of read

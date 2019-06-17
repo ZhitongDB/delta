@@ -16,10 +16,10 @@
 
 package io.delta
 
-import io.delta.execution.DeltaTableOperations
+import org.apache.spark.sql.delta._
+import io.delta.execution._
 
 import org.apache.spark.sql._
-import org.apache.spark.sql.delta.{DeltaErrors, DeltaTableIdentifier, DeltaTableUtils}
 
 /**
  * Main class for programmatically interacting with Delta tables.
@@ -29,7 +29,9 @@ import org.apache.spark.sql.delta.{DeltaErrors, DeltaTableIdentifier, DeltaTable
  * }}}
  *
  */
-class DeltaTable (df: Dataset[Row]) extends DeltaTableOperations {
+class DeltaTable (df: Dataset[Row])
+  extends DeltaTableOperations
+  {
 
   /**
    * Apply an alias to the DeltaTable. This is similar to `Dataset.as(alias)` or
@@ -66,31 +68,4 @@ object DeltaTable {
     new DeltaTable(sparkSession.read.format("delta").load(path))
   }
 
-  // BEGIN-EDGE
-  /**
-   * Create a DeltaTable using the given table or view name using the given SparkSession.
-   *
-   * Note: This uses the active SparkSession in the current thread to read the table data. Hence,
-   * this throws error if active SparkSession has not been set, that is,
-   * `SparkSession.getActiveSession()` is empty.
-   */
-  def forName(tableOrViewName: String): DeltaTable = {
-    val sparkSession = SparkSession.getActiveSession.getOrElse {
-      throw new IllegalArgumentException("Could not find active SparkSession")
-    }
-    forName(sparkSession, tableOrViewName)
-  }
-
-  /**
-   * Create a DeltaTable using the given table or view name using the given SparkSession.
-   */
-  def forName(sparkSession: SparkSession, tableName: String): DeltaTable = {
-     val tableId = sparkSession.sessionState.sqlParser.parseTableIdentifier(tableName)
-     if (DeltaTableUtils.isDeltaTable(sparkSession, tableId)) {
-      new DeltaTable(sparkSession.table(tableName))
-     } else {
-       throw DeltaErrors.notADeltaTableException(DeltaTableIdentifier(table = Some(tableId)))
-     }
-  }
-  // END-EDGE
 }

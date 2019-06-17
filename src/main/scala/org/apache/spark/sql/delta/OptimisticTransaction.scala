@@ -24,6 +24,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
+import com.databricks.spark.util.TagDefinitions.TAG_LOG_STORE_CLASS
 import org.apache.spark.sql.delta.actions._
 import org.apache.spark.sql.delta.files._
 import org.apache.spark.sql.delta.metering.DeltaLogging
@@ -32,7 +33,6 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.delta.stats.DeltaScan
 import org.apache.spark.sql.execution.datasources.parquet.ParquetSchemaConverter
 import org.apache.spark.util.{Clock, Utils}
 
@@ -140,6 +140,9 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
   /** The protocol of the snapshot that this transaction is reading at. */
   val protocol = snapshot.protocol
 
+  /** Tracks the appIds that have been seen by this transaction. */
+  protected val readTxn = new ArrayBuffer[String]
+
   /** Tracks if this transaction has already committed. */
   protected var committed = false
 
@@ -149,12 +152,12 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
   protected val txnStartNano = System.nanoTime()
   protected var commitStartNano = -1L
   protected var commitInfo: CommitInfo = _
-  protected var dependsOnFiles: Boolean = false
 
-  /** Tracks the data that could have been seen by this transaction. */
-  protected val readPredicates = new ArrayBuffer[Expression]
-  /** Tracks specific files that have been seen by this transaction. */
-  protected val readFiles = new mutable.HashSet[AddFile]
+  /**
+   * Tracks if this transaction depends on any data files. This flag must be set if this transaction
+   * reads any data explicitly or implicitly (e.g., delete, update and overwrite).
+   */
+  protected var dependsOnFiles: Boolean = false
 
   /** The version that this transaction is reading from. */
   def readVersion: Long = snapshot.version
@@ -206,21 +209,11 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
 
   /** Returns files matching the given predicates. */
   def filterFiles(filters: Seq[Expression]): Seq[AddFile] = {
-    filesForScan(projection = Nil, filters).files
-  }
+    implicit val enc = SingleAction.addFileEncoder
 
-  /** Returns a[[DeltaScan]] based on the given filters and projections. */
-  def filesForScan(
-    projection: Seq[Attribute],
-    filters: Seq[Expression],
-    keepStats: Boolean = false): DeltaScan = {
-    val scan = snapshot.filesForScan(projection, filters)
-    val partitionFilters = filters.filter { f =>
-      DeltaTableUtils.isPredicatePartitionColumnsOnly(f, metadata.partitionColumns, spark)
-    }
-    readPredicates += partitionFilters.reduceLeftOption(And).getOrElse(Literal(true))
-    readFiles ++= scan.files
-    scan
+    dependsOnFiles = true
+
+    snapshot.filesForScan(Nil, filters).files
   }
 
   /** Mark the entire table as tainted by this transaction. */
@@ -231,7 +224,10 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
   /**
    * Returns the latest version that has committed for the idempotent transaction with given `id`.
    */
-  def txnVersion(id: String): Long = snapshot.transactions.getOrElse(id, -1L)
+  def txnVersion(id: String): Long = {
+    readTxn += id
+    snapshot.transactions.getOrElse(id, -1L)
+  }
 
   /**
    * Modifies the state of the log by adding a new commit that is based on a read at
@@ -265,7 +261,7 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
         Some(isBlindAppend))
       finalActions = commitInfo +: finalActions
 
-      val commitVersion = doCommit(snapshot.version + 1, finalActions)
+      val commitVersion = doCommit(snapshot.version + 1, finalActions, 0)
       logInfo(s"Committed delta #$commitVersion to ${deltaLog.logPath}")
       postCommit(commitVersion, finalActions)
       commitVersion
@@ -348,7 +344,8 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
    */
   private def doCommit(
       attemptVersion: Long,
-      actions: Seq[Action]): Long = deltaLog.lockInterruptibly {
+      actions: Seq[Action],
+      attemptNumber: Int): Long = deltaLog.lockInterruptibly {
     try {
       logDebug(s"Attempting to commit version $attemptVersion with ${actions.size} actions")
 
@@ -396,8 +393,59 @@ trait OptimisticTransactionImpl extends TransactionalWrite {
       attemptVersion
     } catch {
       case e: java.nio.file.FileAlreadyExistsException =>
-        throw new ConcurrentModificationException(
-          "TODO: Use DeltaErrors.DeltaConcurrentModificationException")
+        checkAndRetry(attemptVersion, actions, attemptNumber)
     }
+  }
+
+  /**
+   * Looks at actions that have happened since the txn started and checks for logical
+   * conflicts with the read/writes. If no conflicts are found, try to commit again
+   * otherwise, throw an exception.
+   */
+  protected def checkAndRetry(
+      checkVersion: Long,
+      actions: Seq[Action],
+      attemptNumber: Int): Long = recordDeltaOperation(
+        deltaLog,
+        "delta.commit.retry",
+        tags = Map(TAG_LOG_STORE_CLASS -> deltaLog.store.getClass.getName)) {
+    deltaLog.update()
+    val nextAttempt = deltaLog.snapshot.version + 1
+
+    (checkVersion until nextAttempt).foreach { version =>
+      val winningCommitActions =
+        deltaLog.store.read(deltaFile(deltaLog.logPath, version)).map(Action.fromJson)
+      val metadataUpdates = winningCommitActions.collect { case a: Metadata => a }
+      val txns = winningCommitActions.collect { case a: SetTransaction => a }
+      val protocol = winningCommitActions.collect { case a: Protocol => a }
+      val commitInfo = winningCommitActions.collectFirst { case a: CommitInfo => a }.map(
+        ci => ci.copy(version = Some(version)))
+      val fileActions = winningCommitActions.collect { case f: FileAction => f }
+      // If the log protocol version was upgraded, make sure we are still okay.
+      // Fail the transaction if we're trying to upgrade protocol ourselves.
+      if (protocol.nonEmpty) {
+        deltaLog.protocolRead()
+        deltaLog.protocolWrite()
+        actions.foreach {
+          case Protocol(_, _) => throw new ProtocolChangedException(commitInfo)
+          case _ =>
+        }
+      }
+      // Fail if the metadata is different than what the txn read.
+      if (metadataUpdates.nonEmpty) {
+        throw new MetadataChangedException(commitInfo)
+      }
+      // Fail if the data is different than what the txn read.
+      if (dependsOnFiles && fileActions.nonEmpty) {
+        throw new ConcurrentWriteException(commitInfo)
+      }
+      // Fail if idempotent transactions have conflicted.
+      val txnOverlap = txns.map(_.appId).toSet intersect readTxn.toSet
+      if (txnOverlap.nonEmpty) {
+        throw new ConcurrentTransactionException(commitInfo)
+      }
+    }
+    logInfo(s"No logical conflicts with deltas [$checkVersion, $nextAttempt), retrying.")
+    doCommit(nextAttempt, actions, attemptNumber + 1)
   }
 }
