@@ -20,9 +20,9 @@ import org.apache.spark.sql.delta.{DeltaErrors, DeltaFullTable}
 import org.apache.spark.sql.delta.commands.DeleteCommand
 import io.delta.DeltaTable
 
-import org.apache.spark.sql.{functions, Column, Dataset, SparkSession}
-import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
+import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedAttribute}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, ExtractValue, GetStructField}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.command.RunnableCommand
@@ -59,6 +59,46 @@ trait DeltaTableOperations { self: DeltaTable =>
 
     deleteCommand.run(sparkSession)
   }
+
+  def update(set: Map[String, Column]): Unit = {
+    val sparkSession = SparkSession.getActiveSession.getOrElse(self.toDF.sparkSession)
+    val setColumns = getSetColumnsForColumn(set)
+    val updateTable = makeUpdateTable(sparkSession, self, None, setColumns)
+    val analyzer = sparkSession.sessionState.analyzer
+    val resolvedUpdate = analyzer.executeAndCheck(updateTable)
+    val updateCommand =
+  }
+
+  protected def getSetColumnsForColumn(set: Map[String, Column]): Seq[(String, Column)] = {
+    var setColumns: Seq[(String, Column)] = Seq()
+    for ((col, expr) <- set) {
+      setColumns = setColumns :+ ((col, expr))
+    }
+    setColumns
+  }
+
+  protected def makeUpdateTable(
+    sparkSession: SparkSession,
+    target: DeltaTable,
+    onCondition: Option[Column],
+    setColumns: Seq[(String, Column)]): UpdateOp = {
+    val updateColumns = setColumns.map { x => UnresolvedAttribute.quotedString(x._1) }
+    val updateExpressions = setColumns.map{ x => x._2.expr }
+    onCondition match {
+      case Some(c) =>
+        new UpdateOp(
+          target.toDF.queryExecution.analyzed,
+          updateColumns,
+          updateExpressions,
+          Some(c.expr))
+      case None =>
+        new UpdateOp(
+          target.toDF.queryExecution.analyzed,
+          updateColumns,
+          updateExpressions,
+          None)
+    }
+  }
 }
 
 /**
@@ -72,6 +112,26 @@ case class DeleteOp(
   condition: Option[Expression])
   extends UnaryNode {
   override def output: Seq[Attribute] = Seq.empty
+}
+
+/**
+ * Perform UPDATE on a table
+ *
+ * @param child the logical plan representing target table
+ * @param updateColumns: the to-be-updated target columns
+ * @param updateExpressions: the corresponding update expression if the condition is matched
+ * @param condition: Only rows that match the condition will be updated
+ */
+case class UpdateOp(
+  child: LogicalPlan,
+  updateColumns: Seq[Attribute],
+  updateExpressions: Seq[Expression],
+  condition: Option[Expression])
+  extends UnaryNode {
+
+  override def output: Seq[Attribute] = Seq.empty
+
+  assert(updateColumns.size == updateExpressions.size)
 }
 
 /**
@@ -91,4 +151,38 @@ case class PreprocessTableDelete(conf: SQLConf) extends Rule[LogicalPlan] {
     DeleteCommand(index, delete.child, delete.condition)
   }
 }
+
+/**
+ * Preprocess the [[UpdateOp]] plan
+ * - Adjust the column order, which could be out of order, based on the destination table
+ * - Generate expressions to compute the value of all target columns in Delta table, while taking
+ *   into account that the specified SET clause may only update some columns or nested fields of
+ *   columns.
+ */
+case class PreprocessTableUpdate(conf: SQLConf)
+  extends Rule[LogicalPlan] with UpdateExpressionsSupport {
+
+  override def apply(plan: LogicalPlan): LogicalPlan = {
+    apply0(plan)
+  }
+
+  def apply0(plan: LogicalPlan): LogicalPlan = plan.resolveOperators {
+    case UpdateOp(target, updateColumns, updateExprs, condition) =>
+      val index = EliminateSubqueryAliases(target) match {
+        case DeltaFullTable(tahoeFileIndex) =>
+          tahoeFileIndex
+        case o =>
+          throw DeltaErrors.notADeltaSourceException("UPDATE", Some(o))
+      }
+
+      val targetColNameParts = updateColumns.map(_.asInstanceOf[UnresolvedAttribute].nameParts)
+      val updateOps = targetColNameParts.zip(updateExprs).map {
+        case (nameParts, expr) => UpdateOperation(nameParts, expr)
+      }
+      val alignedUpdateExprs = generateUpdateExpressions(target.output, updateOps, conf.resolver)
+      UpdateCommand(index, target, alignedUpdateExprs, condition)
+  }
+}
+
+
 
