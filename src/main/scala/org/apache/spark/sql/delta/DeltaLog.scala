@@ -22,6 +22,8 @@ import java.util.concurrent.{Callable, TimeUnit}
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.Try
+import scala.util.control.NonFatal
 
 import com.databricks.spark.util.TagDefinitions._
 import org.apache.spark.sql.delta.actions._
@@ -631,8 +633,8 @@ object DeltaLog extends DeltaLogging {
    * We create only a single [[DeltaLog]] for any given path to avoid wasted work
    * in reconstructing the log.
    */
-  private val deltaLogCache =
-    CacheBuilder.newBuilder()
+  private val deltaLogCache = {
+    val builder = CacheBuilder.newBuilder()
       .expireAfterAccess(60, TimeUnit.MINUTES)
       .removalListener(new RemovalListener[Path, DeltaLog] {
         override def onRemoval(removalNotification: RemovalNotification[Path, DeltaLog]) = {
@@ -643,7 +645,11 @@ object DeltaLog extends DeltaLogging {
           }
         }
       })
-      .build[Path, DeltaLog]()
+    sys.props.get("delta.log.cacheSize")
+      .flatMap(v => Try(v.toLong).toOption)
+      .foreach(builder.maximumSize)
+    builder.build[Path, DeltaLog]()
+  }
 
   /** Helper for creating a log when it stored at the root of the data. */
   def forTable(spark: SparkSession, dataPath: String): DeltaLog = {
@@ -735,6 +741,18 @@ object DeltaLog extends DeltaLogging {
     } else {
       deltaLogCache.invalidate(path)
       apply(spark, path)
+    }
+  }
+
+  /** Invalidate the cached DeltaLog object for the given `dataPath`. */
+  def invalidateCache(spark: SparkSession, dataPath: Path): Unit = {
+    try {
+      val rawPath = new Path(dataPath, "_delta_log")
+      val fs = rawPath.getFileSystem(spark.sessionState.newHadoopConf())
+      val path = fs.makeQualified(rawPath)
+      deltaLogCache.invalidate(path)
+    } catch {
+      case NonFatal(e) => logWarning(e.getMessage, e)
     }
   }
 

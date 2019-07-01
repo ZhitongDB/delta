@@ -19,6 +19,7 @@ package io.delta
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.delta._
+
 import org.apache.spark.sql._
 
 /**

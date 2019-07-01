@@ -38,7 +38,7 @@ class DeltaTableSuite extends QueryTest
   }
 
   test("forPath - with non-Delta table path") {
-    val msg = "not a Delta table"
+    val msg = "not a delta table"
     withTempDir { dir =>
       testData.write.format("parquet").mode("overwrite").save(dir.getAbsolutePath)
       testError(msg) { DeltaTable.forPath(spark, dir.getAbsolutePath) }
